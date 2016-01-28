@@ -100,7 +100,10 @@ endfunction
 function! s:FlushIndex()
   let lines = []
   for d in keys(s:dbs)
-    call add(lines, d.'|'.s:dbs[d]['id'].'|'.s:dbs[d]['loadtimes'].'|'.s:dbs[d]['dirty'])
+    call add(lines, d.'|'.s:dbs[d]['id'].'|'.s:dbs[d]['loadtimes'].'|'.s:dbs[d]['dirty'].'|'.s:dbs[d]['project'])
+    if index(s:projects, s:dbs[d]['project']) == -1
+      call add(s:projects, s:dbs[d]['project'])
+    endif
   endfor
   call writefile(lines, s:index_file)
 endfunction
@@ -171,12 +174,14 @@ function! s:InitDB(dir)
   let s:dbs[a:dir]['id'] = id
   let s:dbs[a:dir]['loadtimes'] = 0
   let s:dbs[a:dir]['dirty'] = 0
+  let s:dbs[a:dir]['project'] = 'default'
   call <SID>_CreateDB(a:dir, 1)
   call <SID>FlushIndex()
 endfunction
 
 function! s:LoadDB(dir)
-  cs kill -1
+"  commented by haihua.liu for load more then one DB
+"  cs kill -1
   exe 'cs add '.s:cscope_vim_dir.'/'.s:dbs[a:dir]['id'].'.db'
   if filereadable(s:cscope_vim_dir.'/'.s:dbs[a:dir]['id'].'_inc.db')
     exe 'cs add '.s:cscope_vim_dir.'/'.s:dbs[a:dir]['id'].'_inc.db'
@@ -185,6 +190,7 @@ function! s:LoadDB(dir)
   call <SID>FlushIndex()
 endfunction
 
+" TODO load all db files which are the same project except the default
 function! s:AutoloadDB(dir)
   let m_dir = <SID>GetBestPath(a:dir)
   if m_dir == ""
@@ -194,14 +200,160 @@ function! s:AutoloadDB(dir)
       let m_dir = <SID>CheckAbsolutePath(m_dir, a:dir)
       call <SID>InitDB(m_dir)
       call <SID>LoadDB(m_dir)
+      call <SID>mergePorject(m_dir)
     endif
   else
-    let id = s:dbs[m_dir]['id']
-    if cscope_connection(2, s:cscope_vim_dir.'/'.id.'.db') == 0
-      call <SID>LoadDB(m_dir)
-    endif
+" add by haihua.liu for project load db
+    call <SID>loadProject(s:dbs[m_dir]['project'])
+" end by haihua.liu
   endif
 endfunction
+
+function! s:getProject(d)
+  return s:dbs[a:d]['project']
+endfunction
+
+function! s:setProject(d, project)
+  s:dbs[a:d]['project'] = a:project
+endfunction
+
+function! s:getId(d)
+  return s:dbs[a:d]['id']
+endfunction
+
+function! s:setId(d, id)
+  s:dbs[a:d]['id'] = a:id
+endfunction
+
+function! s:mergeChildDB(directory)
+  " merge child dbs which have the same project except
+  " dbs with the 'default' project value
+  " a:directory must be the key of s:dbs
+  let dir_p = <SID>getProject(a:directory)
+  if dir_p ==# 'default'
+    return
+  endif
+
+  for d in keys(s:dbs)
+    let d_p = <SID>getProject(d)
+    if d_p ==# dir_p && len(a:directory) < len(d) && stridx(d, a:directory) == 0
+      call <SID>clearDBs(d)
+    endif
+  endfor
+endfunction
+
+function! s:loadProject(project)
+    if a:project != 'default'
+      for d in keys(s:dbs)
+        if a:project ==# s:dbs[d]['project']
+          let id = s:dbs[d]['id']
+          if cscope_connection(2, s:cscope_vim_dir.'/'.id.'.db') == 0
+            call <SID>LoadDB(d)
+          endif
+        endif
+      endfor
+    endif
+endfunction
+
+" add by haihua.liu for add project info
+function! AddDirectory()
+  echohl WarningMsg | echo "please input: <directory> [project]" | echohl None
+  let input = input("", expand('%:p:h'), 'dir')
+  let inputarry = split(input, '')
+  if len(inputarry) > 1
+    let dir = inputarry[0]
+    let project = inputarry[1]
+    if index(s:projects, project) == -1
+      call add(projects, project)
+    endif
+  elseif len(inputarry) > 0
+    let dir = inputarry[0]
+    let project = ""
+  else
+    return
+  endif
+
+  let m_dir = <SID>GetBestPath(dir)
+  if m_dir == ""
+    echohl WarningMsg | echo "\nNew dir for cscope, we will add it into database" | echohl None
+    let m_dir = <SID>CheckAbsolutePath(dir, dir)
+    call <SID>InitDB(m_dir)
+    call <SID>LoadDB(m_dir)
+    if project != ""
+      let s:dbs[m_dir]['project'] = project
+    endif
+    call <SID>mergeChildDB(m_dir)
+  else
+    echohl WarningMsg | echo "\nDir exist for cscope, no need to add !" | echohl None
+  endif
+endfunction
+
+function! DirOrId(A, L, P)
+    let candidates = keys(s:dbs)
+    for d in keys(s:dbs)
+      call add(candidates, s:dbs[d]['id'])
+    endfor
+    call filter(candidates, 'v:val =~# "^" . a:A')
+  return candidates
+endfunction
+
+function! Projects(A, L, P)
+  return filter(s:projects, 'v:val =~# "^" . a:A')
+endfunction
+
+function! ModifyProject()
+  let input = input("Please input directory or id: ", "", 'customlist,DirOrId')
+  let project = input("Assigned to which project: ", "", 'customlist,Projects')
+  call <SID>moveProject(input, project)
+endfunction
+
+let s:projects = []
+
+function! s:moveProject(src, project)
+  if a:src !~ '^\d\+$'
+    let directory = a:src
+  else
+    let directory = <SID>getDirOfId(a:src)
+  endif
+
+  if directory != ""
+    let directorys = []
+    if directory[-1:] == '*'
+      let directorys = filter(keys(s:dbs), 'v:val =~# "^" . directory[0:-2]')
+    else
+      let m_dir = <SID>GetBestPath(directory)
+      call add(directorys, m_dir)
+    endif
+
+    if len(directorys) == 0 || index(directorys, '') != -1
+      echohl WarningMsg | echo "\nNo proper cscope DB find, please retry!" | echohl None
+      return
+    else
+      if a:project == ""
+        echohl WarningMsg | echo "\nEmpty project name, return with no operation!" | echohl None
+        return
+      endif
+      for m_dir in directorys
+        let s:dbs[m_dir]['project'] = a:project
+      endfor
+      call <SID>FlushIndex()
+    endif
+  else
+    echohl WarningMsg | echo "\nEmpty directory, return with no operation!" | echohl None
+  endif
+endfunction
+
+function! s:getDirOfId(id)
+  let dir = ""
+  for d in keys(s:dbs)
+    if a:id == s:dbs[d]['id']
+      let dir = d
+      break
+    endif
+  endfor
+  return dir
+endfunction
+
 
 function! s:updateDBs(dirs)
   for d in a:dirs
@@ -217,7 +369,8 @@ function! s:echo(msg)
 endfunction
 
 function! s:clearDBs(dir)
-  cs kill -1
+" commented for merge DB
+" cs kill -1
   if a:dir == ""
     let s:dbs = {}
     call <SID>RmDBfiles()
@@ -232,20 +385,36 @@ function! s:clearDBs(dir)
   call <SID>FlushIndex()
 endfunction
 
+function! s:maxProjectLen()
+  let max = 0
+  for p in s:projects
+    let max = len(p) > max ? len(p) : max
+  endfor
+  return max
+endfunction
+
 function! s:listDBs()
   let dirs = keys(s:dbs)
   if len(dirs) == 0
     echo "You have no cscope dbs now."
   else
-    let s = [' ID                   LOADTIMES    PATH']
-    for d in dirs
-      let id = s:dbs[d]['id']
-      if cscope_connection(2, s:cscope_vim_dir.'/'.id.'.db') == 1
-        let l = printf("*%d  %10d            %s", id, s:dbs[d]['loadtimes'], d)
-      else
-        let l = printf(" %d  %10d            %s", id, s:dbs[d]['loadtimes'], d)
-      endif
-      call add(s, l)
+    let max_p = <SID>maxProjectLen()
+    let h_offset = max_p > 7 ? max_p - 6 : 1
+    let c_offset = max_p > 7 ? max_p + 1 : 8
+    let head = printf(" PROJECT%-".h_offset."sID         LOADTIMES PATH", " ")
+    let s = [head]
+    for project in s:projects
+      for d in dirs
+        if project ==# s:dbs[d]['project']
+          let id = s:dbs[d]['id']
+          if cscope_connection(2, s:cscope_vim_dir.'/'.id.'.db') == 1
+            let l = printf("*%-".c_offset."s%-11d%-10d%s", s:dbs[d]['project'], id, s:dbs[d]['loadtimes'], d)
+          else
+            let l = printf(" %-".c_offset."s%-11d%-10d%s", s:dbs[d]['project'], id, s:dbs[d]['loadtimes'], d)
+          endif
+          call add(s, l)
+        endif
+      endfor
     endfor
     echo join(s, "\n")
   endif
@@ -270,6 +439,14 @@ function! s:loadIndex()
             let s:dbs[e[0]]['id'] = e[1]
             let s:dbs[e[0]]['loadtimes'] = e[2]
             let s:dbs[e[0]]['dirty'] = (len(e) > 3) ? e[3] :0
+            if len(e) > 4
+              let s:dbs[e[0]]['project'] = e[4]
+              if index(s:projects, e[4]) == -1
+                call add(s:projects, e[4])
+              endif
+            else
+              let s:dbs[e[0]]['project'] = "default"
+            endif
           else
             call delete(db_file)
           endif
